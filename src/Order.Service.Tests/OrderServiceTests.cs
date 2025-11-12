@@ -5,9 +5,13 @@ using NUnit.Framework;
 using Order.Data;
 using Order.Data.Entities;
 using System;
+using System.Collections.Generic;
 using System.Data.Common;
 using System.Linq;
 using System.Threading.Tasks;
+using Order.Data.Exceptions;
+using Order.Model;
+using OrderItem = Order.Data.Entities.OrderItem;
 
 namespace Order.Service.Tests
 {
@@ -19,6 +23,8 @@ namespace Order.Service.Tests
         private DbConnection _connection;
 
         private readonly byte[] _orderStatusCreatedId = Guid.NewGuid().ToByteArray();
+        private readonly byte[] _orderStatusInProgressId = Guid.NewGuid().ToByteArray();
+        private readonly byte[] _orderStatusCompleted = Guid.NewGuid().ToByteArray();
         private readonly byte[] _orderServiceEmailId = Guid.NewGuid().ToByteArray();
         private readonly byte[] _orderProductEmailId = Guid.NewGuid().ToByteArray();
 
@@ -154,6 +160,221 @@ namespace Order.Service.Tests
             Assert.AreEqual(1.8m, order.TotalPrice);
         }
 
+        [Test]
+        public async Task GetOrderByStatus_ReturnsOrdersWithCorrectStatus()
+        {
+            // Arrange
+            var orderId1 = Guid.NewGuid();
+            var orderId2 = Guid.NewGuid();
+            await AddOrderInProgress(orderId1, 2);
+            await AddOrder(orderId2, 2);
+
+            // Act
+            var orders = await _orderService
+                .GetOrdersByStatusAsync(new Guid(_orderStatusInProgressId));
+
+            var ordersByStatusName = await _orderService.GetOrdersByStatusAsync("In Progress");
+            
+            // Assert
+            foreach (var order in orders)
+            {
+                Assert.AreEqual(new Guid(_orderStatusInProgressId), order.StatusId);
+            }
+            
+            foreach (var order in ordersByStatusName)
+            {
+                Assert.AreEqual(new Guid(_orderStatusInProgressId), order.StatusId);
+            }
+        }
+        
+        [Test]
+        public async Task GetOrderByStatus_ShouldReturnCorrectCount_WhenOrderWithStatusFound()
+        {
+            // Arrange
+            var orderId1 = Guid.NewGuid();
+            var orderId2 = Guid.NewGuid();
+            await AddOrderInProgress(orderId1, 2);
+            await AddOrder(orderId2, 2);
+
+            // Act
+            var orders = await _orderService
+                .GetOrdersByStatusAsync(new Guid(_orderStatusInProgressId));
+
+            // Assert
+            Assert.AreEqual(1, orders.Count());
+        }
+        
+        [Test]
+        public async Task GetOrdersByStatus_ShouldReturnEmptyCollection_WhenNoOrderWithStatusFound()
+        {
+            // Arrange ;
+            var orderId2 = Guid.NewGuid();
+            await AddOrder(orderId2, 2);
+
+            // Act
+            var orders = await _orderService
+                .GetOrdersByStatusAsync(new Guid(_orderStatusInProgressId));
+            var orderByStatusName = await _orderService
+                .GetOrdersByStatusAsync("In Progress");
+
+            // Assert
+            Assert.IsNotNull(orders);
+            Assert.IsEmpty(orders);
+            Assert.IsNotNull(orderByStatusName);
+            Assert.IsEmpty(orderByStatusName);
+        }
+
+        [Test]
+        public async Task GetFinishedOrdersProfitForMonthAsync_ShouldReturnZero_WhenNoRelevantOrdersFound()
+        {
+            // Arrange
+            var orderId1 = Guid.NewGuid();
+            await AddOldCompletedOrder(orderId1, 1);
+            await AddOrderInProgress(Guid.NewGuid(), 1);
+            
+            // Act
+            var profit = await _orderService.GetFinishedOrdersProfitForMonthAsync();
+            
+            // Assert
+            Assert.AreEqual((decimal)0, profit);
+        }
+        
+        [Test]
+        public async Task GetFinishedOrdersProfitForMonthAsync_ShouldReturnCorrectProfit_ForRelevantOrders()
+        {
+            // Arrange
+            var orderId1 = Guid.NewGuid();
+            await AddRelevantCompletedOrder(orderId1, 2);
+            
+            // Act
+            var profit = await _orderService.GetFinishedOrdersProfitForMonthAsync();
+            
+            // Assert
+            Assert.AreEqual(0.2m, profit);
+        }
+
+        [Test]
+        public async Task CreateOrderAsync_ShouldReturnOrderId_WhenOrderCreatedSuccessfully()
+        {
+            // Arrange
+            var orderCreateRequest = new CreateOrderRequest
+            {
+                CustomerId = Guid.NewGuid(),
+                ResellerId = Guid.NewGuid(),
+                Items = new List<CreateOrderItemRequest>
+                {
+                    new()
+                    {
+                        ProductId = new Guid(_orderProductEmailId),
+                        Quantity = 1
+                    }
+                }
+            };
+            
+            // Act
+            var orderIdResult = await _orderService.CreateOrderAsync(orderCreateRequest);
+            
+            // Assert
+            Assert.NotNull(orderIdResult);
+            Assert.AreNotEqual(orderIdResult, Guid.Empty);
+            Assert.IsNotNull(orderIdResult);
+        }
+
+        [Test] public async Task CreateOrderAsync_ShouldThrow_WhenProductDoesntExist()
+        {
+            // Arrange
+            var orderCreateRequest = new CreateOrderRequest
+            {
+                CustomerId = Guid.NewGuid(),
+                ResellerId = Guid.NewGuid(),
+                Items = new List<CreateOrderItemRequest>
+                {
+                    new()
+                    {
+                        ProductId = Guid.NewGuid(),
+                        Quantity = 1
+                    }
+                }
+            };
+            
+            // Act, Assert
+            Assert.ThrowsAsync<ProductNotFoundException>(
+                async () => await _orderService.CreateOrderAsync(orderCreateRequest));
+        }
+        
+        [Test] public async Task UpdateOrderStatus_ShouldReturnUpdated_WhenOrderUpdated()
+        {
+            // Arrange
+            var updateRequest = new UpdateOrderStatusRequest(null, "Completed");
+            var orderId = Guid.NewGuid();
+            await AddOrder(orderId, 1);
+            
+            // Act
+            var result = await _orderService.UpdateOrderStatusAsync(orderId, updateRequest);
+            
+            // Act, Assert
+            Assert.AreEqual(result, StatusUpdateResult.Updated);
+        }
+        
+        [Test] public async Task UpdateOrderStatus_ShouldReturnNoChange_IfStatusWasTheSame()
+        {
+            // Arrange
+            var updateRequest = new UpdateOrderStatusRequest(null, "Completed");
+            var orderId = Guid.NewGuid();
+            await AddRelevantCompletedOrder(orderId, 1);
+            
+            // Act
+            var result = await _orderService.UpdateOrderStatusAsync(orderId, updateRequest);
+            
+            // Act, Assert
+            Assert.AreEqual(result, StatusUpdateResult.NoChange);
+        }
+        
+        [Test] public async Task UpdateOrderStatus_ShouldReturnNotFound_IfOrderNotFound()
+        {
+            // Arrange
+            var updateRequest = new UpdateOrderStatusRequest(null, "Completed");
+            var orderId = Guid.NewGuid();
+            await AddRelevantCompletedOrder(orderId, 1);
+            
+            // Act
+            var result = await _orderService.UpdateOrderStatusAsync(Guid.NewGuid(), updateRequest);
+            
+            // Act, Assert
+            Assert.AreEqual(result, StatusUpdateResult.NotFound);
+        }
+        
+        [Test] public async Task UpdateOrderStatus_ShouldReturnInvalidStatus_IfStatusNotFound()
+        {
+            // Arrange
+            var updateRequest = new UpdateOrderStatusRequest(null, "asdadad");
+            var updateRequest2 = new UpdateOrderStatusRequest(Guid.NewGuid(), null);
+            var orderId = Guid.NewGuid();
+            await AddRelevantCompletedOrder(orderId, 1);
+            
+            // Act
+            var result = await _orderService.UpdateOrderStatusAsync(orderId, updateRequest);
+            var result2 = await _orderService.UpdateOrderStatusAsync(orderId, updateRequest2);
+            
+            // Act, Assert
+            Assert.AreEqual(result, StatusUpdateResult.InvalidStatus);
+            Assert.AreEqual(result2, StatusUpdateResult.InvalidStatus);
+        }
+        
+        [Test] public async Task UpdateOrderStatus_ShouldReturnStatusNotFound_IfNoStatusesSpecified()
+        {
+            // Arrange
+            var updateRequest = new UpdateOrderStatusRequest(null, null);
+            var orderId = Guid.NewGuid();
+            await AddRelevantCompletedOrder(orderId, 1);
+            
+            // Act
+            var result = await _orderService.UpdateOrderStatusAsync(orderId, updateRequest);
+            
+            // Act, Assert
+            Assert.AreEqual(result, StatusUpdateResult.InvalidStatus);
+        }
+        
         private async Task AddOrder(Guid orderId, int quantity)
         {
             var orderIdBytes = orderId.ToByteArray();
@@ -177,7 +398,79 @@ namespace Order.Service.Tests
 
             await _orderContext.SaveChangesAsync();
         }
+        
+        private async Task AddRelevantCompletedOrder(Guid orderId, int quantity)
+        {
+            var orderIdBytes = orderId.ToByteArray();
+            _orderContext.Order.Add(new Data.Entities.Order
+            {
+                Id = orderIdBytes,
+                ResellerId = Guid.NewGuid().ToByteArray(),
+                CustomerId = Guid.NewGuid().ToByteArray(),
+                CreatedDate = DateTime.Now.AddDays(-1),
+                StatusId = _orderStatusCompleted,
+            });
 
+            _orderContext.OrderItem.Add(new OrderItem
+            {
+                Id = Guid.NewGuid().ToByteArray(),
+                OrderId = orderIdBytes,
+                ServiceId = _orderServiceEmailId,
+                ProductId = _orderProductEmailId,
+                Quantity = quantity
+            });
+
+            await _orderContext.SaveChangesAsync();
+        }
+        
+        private async Task AddOldCompletedOrder(Guid orderId, int quantity)
+        {
+            var orderIdBytes = orderId.ToByteArray();
+            _orderContext.Order.Add(new Data.Entities.Order
+            {
+                Id = orderIdBytes,
+                ResellerId = Guid.NewGuid().ToByteArray(),
+                CustomerId = Guid.NewGuid().ToByteArray(),
+                CreatedDate = DateTime.Now.AddMonths(-1),
+                StatusId = _orderStatusCompleted,
+            });
+
+            _orderContext.OrderItem.Add(new OrderItem
+            {
+                Id = Guid.NewGuid().ToByteArray(),
+                OrderId = orderIdBytes,
+                ServiceId = _orderServiceEmailId,
+                ProductId = _orderProductEmailId,
+                Quantity = quantity
+            });
+
+            await _orderContext.SaveChangesAsync();
+        }
+
+        private async Task AddOrderInProgress(Guid orderId, int quantity)
+        {
+            var orderIdBytes = orderId.ToByteArray();
+            _orderContext.Order.Add(new Data.Entities.Order
+            {
+                Id = orderIdBytes,
+                ResellerId = Guid.NewGuid().ToByteArray(),
+                CustomerId = Guid.NewGuid().ToByteArray(),
+                CreatedDate = DateTime.Now,
+                StatusId = _orderStatusInProgressId,
+            });
+
+            _orderContext.OrderItem.Add(new OrderItem
+            {
+                Id = Guid.NewGuid().ToByteArray(),
+                OrderId = orderIdBytes,
+                ServiceId = _orderServiceEmailId,
+                ProductId = _orderProductEmailId,
+                Quantity = quantity
+            });
+
+            await _orderContext.SaveChangesAsync();
+        }
+        
         private async Task AddReferenceDataAsync(OrderContext orderContext)
         {
             orderContext.OrderStatus.Add(new OrderStatus
@@ -186,6 +479,18 @@ namespace Order.Service.Tests
                 Name = "Created",
             });
 
+            orderContext.OrderStatus.Add(new OrderStatus
+            {
+                Id = _orderStatusInProgressId,
+                Name = "In Progress",
+            });
+            
+            orderContext.OrderStatus.Add(new OrderStatus
+            {
+                Id = _orderStatusCompleted,
+                Name = "Completed",
+            });
+            
             orderContext.OrderService.Add(new Data.Entities.OrderService
             {
                 Id = _orderServiceEmailId,
